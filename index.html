@@ -299,7 +299,8 @@
     history = history.slice(0, 20);
     save(); renderLog();
     if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
-    setStatus(source === "camera" ? "Got it. Keep pointing to scan another." : "");
+        if (source === "camera") stopLive();
+    setStatus(source === "camera" ? "Got it. Tap Start camera to scan another." : "");
   }
 
   // ---- Live camera ----
