@@ -125,6 +125,32 @@
   .log .when { font-size: 0.78rem; color: var(--muted); white-space: nowrap; }
   .empty { color: var(--muted); font-size: 0.9rem; margin: 0; }
   .clear { justify-self: start; background: none; border: 0; color: var(--muted); font: 500 0.82rem var(--font-body); text-decoration: underline; cursor: pointer; padding: 0; }
+  /* Scan feedback */
+  [hidden] { display: none !important; }
+  :root { --ok: #17803d; --ok-soft: #e1f3e6; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { --ok: #4fd284; --ok-soft: #14301f; } }
+  :root[data-theme="dark"] { --ok: #4fd284; --ok-soft: #14301f; }
+  .pill {
+    position: absolute; top: 12px; left: 50%; transform: translateX(-50%);
+    background: rgba(0, 0, 0, 0.62); color: #ffffff; font: 600 0.82rem var(--font-body);
+    padding: 6px 14px; border-radius: 999px; white-space: nowrap; overflow: hidden;
+  }
+  .pill.aiming::after {
+    content: ""; position: absolute; left: 0; bottom: 0; height: 3px; width: 100%; background: #ffffff;
+    transform-origin: left; animation: aim var(--aim-ms, 1500ms) linear forwards;
+  }
+  @keyframes aim { from { transform: scaleX(0); } to { transform: scaleX(1); } }
+  .viewer video[hidden] ~ .pill { display: none; }
+  .viewer.aiming .laser { opacity: 0.25; animation-play-state: paused; }
+  .viewer.success .frame::before, .viewer.success .frame::after { border-color: #4fd284; opacity: 1; }
+  .viewer.success .pill { background: #17803d; }
+  .ok-badge { font: 700 0.75rem var(--font-body); color: var(--ok); background: var(--ok-soft); padding: 3px 8px; border-radius: 6px; }
+  .result.flash { animation: flash 1.4s ease-out; }
+  @keyframes flash {
+    0% { border-color: var(--ok); box-shadow: 0 0 0 4px var(--ok-soft); }
+    100% { border-color: var(--line); box-shadow: 0 0 0 0 transparent; }
+  }
+  @media (prefers-reduced-motion: reduce) { .result.flash, .pill.aiming::after { animation: none; } }
 </style>
 
 </head><body>
@@ -289,18 +315,14 @@
     onHit(result.getText(), ZX.BarcodeFormat[result.getBarcodeFormat()] || "UNKNOWN", source);
   }
 
-  function onHit(text, format, source) {
-    var now = Date.now();
-    if (text === lastText && now - lastAt < 3000) return; // same code still in view
-    lastText = text; lastAt = now;
-    var entry = { text: text, format: format, at: now };
+    function onHit(text, format, source) {
+    var entry = { text: text, format: format, at: Date.now() };
     show(entry, source === "camera" ? "Just scanned" : "From your photo");
     history.unshift(entry);
     history = history.slice(0, 20);
     save(); renderLog();
     if (navigator.vibrate) { try { navigator.vibrate(60); } catch (e) {} }
-        if (source === "camera") stopLive();
-    setStatus(source === "camera" ? "Got it. Tap Start camera to scan another." : "");
+    celebrate(source);
   }
 
   // ---- Live camera ----
@@ -483,8 +505,9 @@
   async function scanLoop() {
     if (!live) return;
     frameNo++;
+        if (frameNo === 1) beginAim();
     try {
-      if (grabFrame()) {
+      if (Date.now() >= scanFrom && grabFrame()) {
         var hit = await detectOnce();
         if (hit && live) onHit(hit.text, hit.format, "camera");
       }
@@ -492,8 +515,74 @@
     if (live) loopTimer = setTimeout(scanLoop, detector ? 100 : 60);
   }
 
-  liveBtn.addEventListener("click", function () { live ? (stopLive(), setStatus("")) : startLive(); });
-  document.addEventListener("visibilitychange", function () { if (document.hidden && live) stopLive(); });
+  // ---- Aim delay and scan feedback ----
+  var AIM_MS = 1500;   // time to line up the barcode before scanning starts
+  var HOLD_MS = 1200;  // how long the frozen picture shows "Scanned" before the camera turns off
+  var scanFrom = 0, aimTimer = 0, successTimer = 0;
+  var viewerEl = document.querySelector(".viewer");
+  var resultEl = document.querySelector(".result");
+  var pill = document.createElement("div");
+  pill.className = "pill";
+  pill.hidden = true;
+  viewerEl.appendChild(pill);
+  var okBadge = document.createElement("span");
+  okBadge.className = "ok-badge";
+  okBadge.textContent = "✓ Scan successful";
+  okBadge.hidden = true;
+  fmtEl.parentNode.insertBefore(okBadge, fmtEl);
+
+  function setPill(text, mode) {
+    pill.hidden = !text;
+    pill.textContent = text || "";
+    pill.className = "pill" + (mode ? " " + mode : "");
+  }
+
+  function beginAim() {
+    clearTimeout(aimTimer);
+    scanFrom = Date.now() + AIM_MS;
+    viewerEl.style.setProperty("--aim-ms", AIM_MS + "ms");
+    viewerEl.classList.remove("success");
+    viewerEl.classList.add("aiming");
+    setPill("Line up the barcode", "aiming");
+    aimTimer = setTimeout(function () {
+      viewerEl.classList.remove("aiming");
+      if (live) setPill("Scanning…");
+    }, AIM_MS);
+  }
+
+  function endSuccess() {
+    clearTimeout(successTimer);
+    viewerEl.classList.remove("success", "aiming");
+    setPill("");
+  }
+
+  function celebrate(source) {
+    okBadge.hidden = false;
+    resultEl.classList.remove("flash");
+    void resultEl.offsetWidth; // restart the flash animation
+    resultEl.classList.add("flash");
+    if (source !== "camera") { setStatus(""); return; }
+    // Stop looking for codes, freeze the picture, show the success state, then turn the camera off.
+    clearTimeout(loopTimer);
+    clearTimeout(aimTimer);
+    live = false;
+    try { video.pause(); } catch (e) {}
+    viewerEl.classList.remove("aiming");
+    viewerEl.classList.add("success");
+    laser.hidden = true;
+    setPill("✓ Scanned");
+    liveBtn.textContent = "Start camera";
+    setStatus("Scan successful. Tap Start camera to scan another.");
+    successTimer = setTimeout(function () { endSuccess(); stopLive(); }, HOLD_MS);
+    try { resultEl.scrollIntoView({ block: "nearest", behavior: "smooth" }); } catch (e) {}
+  }
+
+  logEl.addEventListener("click", function () { okBadge.hidden = true; });
+
+  liveBtn.addEventListener("click", function () {
+    endSuccess();
+    if (live) { stopLive(); setStatus(""); } else { startLive(); }
+  });  document.addEventListener("visibilitychange", function () { if (document.hidden && live) stopLive(); });
 
   // ---- Photo ----
   function loadImage(file) {
